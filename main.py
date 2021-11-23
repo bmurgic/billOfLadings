@@ -57,7 +57,7 @@ def process_bols(filename):
     # Prepare the browser and workflow
     prepare_bol_workflow()
 
-    # Open the file given
+    # Open the filename given
     bols_f = open(filename, 'r')
     bols = [line.strip() for line in bols_f]
     bols_f.close()
