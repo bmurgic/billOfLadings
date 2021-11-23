@@ -1,23 +1,58 @@
 import pyautogui
+import gspread
 from selenium import webdriver
+from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from time import sleep
+from datetime import datetime
+from oauth2client.service_account import ServiceAccountCredentials
 
 # Open a new instance of Safari with the webdriver
-browser = webdriver.Safari()
+# browser = webdriver.Safari()
+browser = webdriver.Chrome()
+
+# Set size of browser
+browser.set_window_position(0, 0)
+browser.set_window_size(1600, 900)
 
 # Create ActionsChain object
 a = ActionChains(browser)
+
+# Create client to access Google Sheets
+scope = ['https://spreadsheets.google.com/feeds',
+         'https://www.googleapis.com/auth/drive']
+credentials = ServiceAccountCredentials.from_json_keyfile_name('client_secret.json', scope)
+gc = gspread.authorize(credentials)
+worksheet = gc.open("BOLs History").sheet1
+todays_date = datetime.today().strftime('%m/%d/%Y')
 
 # Notes to add in details of BOL
 IN_OFF = "PPW in office"
 
 
-def process_bols(filename, note=IN_OFF):
+def next_available_row(worksheet):
+    str_list = list(filter(None, worksheet.col_values(1)))
+    return str(len(str_list)+1)
+
+
+def write_to_history_spreadsheet(driver, bol, success):
+    # First find the next open spot
+    next_row = next_available_row(worksheet)
+
+    # Then write to history
+    worksheet.update_acell("A{}".format(next_row), driver)
+    worksheet.update_acell("B{}".format(next_row), bol)
+    worksheet.update_acell("C{}".format(next_row), todays_date)
+    worksheet.update_acell("D{}".format(next_row), success)
+
+    print(" Added to history spreadsheet!")
+
+
+def process_bols(filename):
 
     # Prepare the browser and workflow
     prepare_bol_workflow()
@@ -28,61 +63,9 @@ def process_bols(filename, note=IN_OFF):
     bols_f.close()
 
     # Perform BOLs workflow
-    updated_successfully, errored_out = perform_bol_workflow(bols)
+    perform_bol_workflow(bols)
 
     print("Complete!")
-    # Add all successfully updated BOLs to the completed file
-    if len(updated_successfully) > 0:
-        print("Writing BOLs to 'bols_completed.txt'...", end='')
-        while True:
-            try:
-                complete_f = open("bols_completed.txt", "a")
-                for bol in updated_successfully:
-                    complete_f.write(bol + "\n")
-                complete_f.close()
-                break
-            except Exception as e:
-
-                # Alert the user that it failed to save the completed BOLs
-                print("Failed to open bols_completed.txt. Exception raised: " + str(e))
-
-                # Get user input if should retry saving
-                try_again = pyautogui.confirm(text="Failed to open bols_completed.txt. Exception raised: " + str(e),
-                                              title="Bill of Ladings Workflow",
-                                              buttons=['OK', 'Cancel'])
-
-                if try_again in 'Cancel':
-                    break
-
-        print("Success!")
-
-    # Add all successfully updated BOLs to the completed file
-    if len(errored_out) > 0:
-        print("Writing BOLs to 'bols_error.txt'...", end='')
-        while True:
-            try:
-                errored_f = open("bols_error.txt", "a")
-                for bol in errored_out:
-                    errored_f.write(bol + "\n")
-                errored_f.close()
-                break
-            except Exception as e:
-
-                # Alert the user that it failed to save the errored BOLs
-                print("Failed to open bols_error.txt. Exception raised: " + str(e))
-
-                # Get user input if should retry saving
-                try_again = pyautogui.confirm(text="Failed to open bols_error.txt. Exception raised: " + str(e),
-                                              title="Bill of Ladings Workflow",
-                                              buttons=['OK', 'Cancel'])
-
-                if try_again in 'Cancel':
-                    break
-
-        print("Success!")
-        print("There were " + str(len(updated_successfully)) + " updated successfully!", end='')
-        print("There were " + str(len(errored_out)) + " with errors!")
-        input("Press enter to close: ")
 
     # Alert the user that the workflow is complete
     browser.close()
@@ -140,16 +123,18 @@ def login():
             password_elem = browser.find_element(By.NAME, "Password")  # Get password field
 
             while True:
+                password_elem.clear()
                 password_elem.send_keys(str(password))  # Enter the password
                 password_elem.submit()  # Log in
 
                 try:
                     # Once logged in, wait for the home page to load
-                    WebDriverWait(browser, 10).until(EC.presence_of_element_located((By.XPATH, "//a[@href='/Home/Search']")))
+                    WebDriverWait(browser, 10).until(
+                        EC.presence_of_element_located((By.XPATH, "//a[@href='/Home/Search']")))
 
                     break
                 except Exception as e:
-                    password = password = input("Incorrect password. Try again: ")
+                    password = input("Incorrect password. Try again: ")
 
                     if password == "None":
                         browser.close()
@@ -173,13 +158,22 @@ def go_to_search_page():
 
         # Go to the search page
         browser.get("https://otrcapitalportal.com/Home/Search")
+        tried = 0
 
-        try:
-            WebDriverWait(browser, 5).until(EC.presence_of_element_located((By.XPATH, "//div[@id='tbSearchText']")))
-        except Exception as e:
-            print("Search input not found! Exception raised: ", str(e))
-            browser.close()
-            exit()
+        while True:
+            try:
+                WebDriverWait(browser, 5).until(EC.presence_of_element_located((By.XPATH, "//div[@id='tbSearchText']")))
+                break
+            except Exception as e:
+
+                if tried > 5:
+                    print("Too many tries...restart BOL Workflow!")
+                    browser.close()
+                    exit()
+
+                print("Search input not found! Retrying...")
+                go_to_search_page()
+                tried += 1
 
         try:  # Mark checkbox to search for exact BOL number
             check_box_input = browser.find_element(By.XPATH, "//div[@id='cbIsEqual']/input")
@@ -189,7 +183,7 @@ def go_to_search_page():
             print("Checkbox not found!")
 
         try:
-            WebDriverWait(browser, 5).until(EC.presence_of_element_located((By.ID, "_uiq_ft")))
+            WebDriverWait(browser, 1).until(EC.presence_of_element_located((By.ID, "_uiq_ft")))
 
             close_button_modal = browser.find_element(By.XPATH, "//div[@id='_uiq_ft']//button[@class='uiq_close']")
             close_button_modal.click()
@@ -201,66 +195,120 @@ def go_to_search_page():
             browser.close()
             exit()
 
+        a.click(browser.find_element(By.ID, "ddlClient")).perform()
+        for _ in range(3):
+            a.send_keys(Keys.TAB).perform()
+            sleep(0.3)
+        a.send_keys(Keys.ENTER).perform()
+
 
 def search_bol(bol):
 
     # Start search
-    try:
-        # Find search box
-        search_box_input = browser.find_element(By.XPATH, "//div[@id='tbSearchText']//input")  # Get search box input
-        browser.execute_script("$(arguments[0]).click();", search_box_input)  # Click search box
-        search_box_input.clear()  # Clear any text inside input
-        search_box_input.send_keys(bol)  # Enter in the BOL number
-    except Exception as e:
-        return "Could not enter " + bol + " into search box. Exception raised: " + str(e)
+    # Find search box
+    search_input = browser.find_element(By.XPATH, "//div[@id='tbSearchText']//input")
+    # a.click(browser.find_element(By.XPATH, "//div[@id='tbSearchText']")).perform()
+    search_input.clear()
+    search_input.send_keys(bol)
+    print("Searching for " + bol + "...", end='')
 
     try:  # Click the search button
-        browser.find_element(By.ID, "bSearch").click()
+        search_button = browser.find_element(By.ID, "bSearch")
+        search_button.click()
+        # browser.execute_script("$(arguments[0]).click();", search_button)  # Click search box
+
+        WebDriverWait(browser, 5).until(
+            EC.presence_of_element_located((By.XPATH, "//div[@id='dgSearchBoard']//td[text()='" + bol + "']")))
+
+        print("found...", end='')
         return bol + " searched successfully! "
     except Exception as e:
+        print("couldn't find BOL!", end='')
         return "Could not search " + bol + ". Exception raised: " + str(e) + " "
 
 
 def update_bol_notes(bol, note=IN_OFF):
 
-    try:  # Open BOLs details and enter it is in office
-        WebDriverWait(browser, 5).until(EC.presence_of_element_located((By.XPATH, "//td[text()='" + str(bol) + "']")))
-    except (TimeoutException, NoSuchElementException):
-        return "BOL could not be found or does not exist!"
-    except Exception as e:
-        return "BOL could not be found! Error raised: " + str(e)
+    try:  # Open BOLs details
+        WebDriverWait(browser, 5).until(EC.presence_of_element_located((By.CLASS_NAME, "invoice-detail-popup")))
+        popup_link = browser.find_element(By.CLASS_NAME, "popup-link")
+        # a.click(popup_link).perform()
+        browser.execute_script("arguments[0].click();", popup_link)
 
-    try:
-        # Perform the addition of notes to the BOLs details
-        browser.find_element(By.CLASS_NAME, "invoice-detail-popup").click()  # Open the BOLs details popup
+        # Wait for the details popup finish loading
+        WebDriverWait(browser, 10).until(
+            EC.presence_of_element_located((By.XPATH, "//div[@id='FilesGrid']//span[@class='show-file']")))
+        WebDriverWait(browser, 10).until(
+            EC.presence_of_element_located((By.XPATH, "//div[@id='noteTextBoxInPopup']//textarea")))
+        WebDriverWait(browser, 10).until(
+            EC.presence_of_element_located((By.XPATH, "//div[@id='invoiceInfoGrid']/div/div/div/table/tbody/tr/td")))
+        WebDriverWait(browser, 10).until(
+            EC.presence_of_element_located(
+                (By.XPATH, "//div[@id='notesGrid']/div/div/div/div/div/div/table/tbody/tr/td")))
+        notes_input = WebDriverWait(browser, 10).until(
+            EC.presence_of_element_located((By.XPATH, "//div[@id='noteTextBoxInPopup']//textarea")))
+
+        print("opening details...", end='')
     except Exception as e:
+        print("couldn't open details!", end='')
         return "Could not open BOL details. Exception raised: " + str(e)
 
-    try:  # Wait for the popup to finish opening
-        WebDriverWait(browser, 20).until(EC.presence_of_element_located((By.XPATH, "//div[@id='noteTextBoxInPopup']//textarea")))
-        notes = browser.find_element(By.XPATH, "//div[@id='noteTextBoxInPopup']//textarea")  # Find the element for entering notes
-        notes.send_keys(note)  # Enter that the PPW is in the office
+    try:  # Add notes to BOL details
 
+        # Write in office
+        notes_input.send_keys(note)
+        print("wrote in office...", end='')
+
+        # Add the note
         add_button = browser.find_element(By.ID, "btnAddInvoiceNote")  # Find the element to add details
-        add_button.click()  # Click add button
+        add_button.click()
+
+        # Check if it was added before closing
+        WebDriverWait(browser, 10).until(
+            EC.presence_of_element_located((By.XPATH, "//div[@id='notesGrid']//td[contains(text(), 'PPW in office')]")))
+        print("successfully updated notes...", end='')
+
     except Exception as e:
+        print("failed to update notes!", end='')
         return "Could not update details for BOL. Exception raised: " + str(e)
 
     try:  # Close the details popup
-
-
-        # Close the popup
-        browser.find_element(By.XPATH, "//button[text()='Close']").click()
-
+        close_button = browser.find_element(By.XPATH, "//button[text()='Close']")
+        browser.execute_script("arguments[0].click();", close_button)
+        sleep(1.5)
         return bol + " updated!"
     except Exception as e:
+        print("couldn't close notes!", end='')
         return "Could not close BOL details. Exception raised: " + str(e)
 
 
-def perform_bol_workflow(bols):
+def write_to_file(filename, bol):
 
-    updated_successfully = []
-    errored_out = []
+    while True:
+        try:
+            errored_f = open(filename, "a")
+            errored_f.write(bol + "\n")
+            errored_f.close()
+            break
+        except Exception as e:
+
+            # Alert the user that it failed to save the errored BOLs
+            print("Failed to open bols_error.txt. Exception raised: " + str(e))
+
+            # Get user input if should retry saving
+            try_again = pyautogui.confirm(text="Failed to open bols_error.txt. Exception raised: " + str(e),
+                                          title="Bill of Ladings Workflow",
+                                          buttons=['OK', 'Cancel'])
+
+            if try_again in 'Cancel':
+                break
+
+    print(" Added to '" + filename + "!")
+
+
+def perform_bol_workflow(bols):
+    driver = 0
+    bol = 0
 
     while len(bols):
 
@@ -268,24 +316,36 @@ def perform_bol_workflow(bols):
         go_to_search_page()
 
         # Once bol has been ran over, then remove it from the list
-        bol = bols.pop(0)
+        line = bols.pop(0)
+        if len(line) == 3:
+            driver = line
+            bol = bols.pop(0)
+        elif len(line) >= 5:
+            bol = line
 
-        # Search for the BOL
-        searched = search_bol(bol)
+        try:
+            # Search for the BOL
+            searched = search_bol(bol)
 
-        # If it was able to successfully search for the BOL, then update its details
-        if 'not' not in searched:
-            updated = update_bol_notes(bol)
+            # If it was able to successfully search for the BOL, then update its details
+            if 'not' not in searched:
+                updated = update_bol_notes(bol)
 
-            # If it was able to successfully update the BOLs details, then add it to the list of completed BOLs
-            if 'not' not in updated:
-                updated_successfully.append(bol)
+                # If it was able to successfully update the BOLs details, then add it to the file of completed BOLs
+                if 'not' not in updated:
+                    # write_to_file("bols_completed.txt", bol)
+                    write_to_history_spreadsheet(driver, bol, "YES")
+                else:
+                    # write_to_file("bols_error.txt", bol)
+                    write_to_history_spreadsheet(driver, bol, "NO")
             else:
-                errored_out.append(searched + updated)  # If it failed to update the BOL, add it to the list of errors
-        else:
-            errored_out.append(searched)  # If it failed to search the BOL, then add it to the list of errors
+                # write_to_file("bols_error.txt", bol)
+                write_to_history_spreadsheet(driver, bol, "NO")
 
-    return updated_successfully, errored_out
+        except Exception as e:
+            print("Was not able to complete entire BOL Workflow. Exception was raised: " + str(e))
+            browser.close()
+            exit()
 
 
 process_bols("bols.txt")
